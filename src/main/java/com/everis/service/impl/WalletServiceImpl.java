@@ -1,9 +1,11 @@
 package com.everis.service.impl;
 
 import com.everis.dto.Response;
+import com.everis.model.Purchase;
 import com.everis.model.Wallet;
 import com.everis.repository.InterfaceRepository;
 import com.everis.repository.InterfaceWalletRepository;
+import com.everis.service.InterfacePurchaseService;
 import com.everis.service.InterfaceWalletService;
 import com.everis.topic.producer.WalletProducer;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
@@ -35,6 +37,9 @@ public class WalletServiceImpl extends CrudServiceImpl<Wallet, String>
   @Value("${msg.error.registro.if.exists}")
   private String msgIfExists;
 
+  @Value("${msg.error.registro.card.exists}")
+  private String msgCardNotExists;
+
   @Value("${msg.error.registro.notfound.create}")
   private String msgNotFoundCreate;
 
@@ -52,6 +57,9 @@ public class WalletServiceImpl extends CrudServiceImpl<Wallet, String>
 
   @Autowired
   private InterfaceWalletService service;
+  
+  @Autowired
+  private InterfacePurchaseService purchaseService;
 
   @Autowired
   private WalletProducer producer;
@@ -87,11 +95,16 @@ public class WalletServiceImpl extends CrudServiceImpl<Wallet, String>
   @CircuitBreaker(name = CIRCUIT, fallbackMethod = "createFallback")
   public Mono<Wallet> createWallet(Wallet wallet) {
 
+    Mono<Wallet> monoWallet = Mono.just(wallet.toBuilder().build());    
+    
     Flux<Wallet> walletDatabase = service.findAll()
         .filter(list -> list.getPhoneNumber().equals(wallet.getPhoneNumber()));
+    
+    Mono<Purchase> purchaseDatabase = purchaseService.findByCardNumber(wallet.getPurchase().getCardNumber())
+        .switchIfEmpty(Mono.error(new RuntimeException(msgCardNotExists)));
 
     return walletDatabase
-        .collectList()
+        .collectList()        
         .flatMap(list -> {
 
           if (list.size() > 0) {
@@ -100,13 +113,20 @@ public class WalletServiceImpl extends CrudServiceImpl<Wallet, String>
 
           }
 
-          return service.create(wallet)
-              .map(createdObject -> {
-
-                producer.sendCreatedWalletTopic(wallet);
-                return createdObject;
-
+          return monoWallet
+              .zipWith(purchaseDatabase, (a, b) -> {
+                
+                a.setPurchase(b);
+                return a;
+                
               })
+              .flatMap(w -> service.create(w)
+                  .map(createdObject -> {
+
+                    producer.sendCreatedWalletTopic(wallet);
+                    return createdObject;
+                
+              }))
               .switchIfEmpty(Mono.error(new RuntimeException(msgNotFoundCreate)));
 
         });
